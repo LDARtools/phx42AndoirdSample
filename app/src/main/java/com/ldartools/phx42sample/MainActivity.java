@@ -23,6 +23,7 @@ import java.text.DateFormat;
 import java.text.SimpleDateFormat;
 import java.util.Calendar;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.UUID;
 
 public class MainActivity extends AppCompatActivity {
@@ -131,7 +132,9 @@ public class MainActivity extends AppCompatActivity {
         igniteButton = findViewById(R.id.igniteButton);
         igniteButton.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) {
-                sendCommand("AIGS GO=1");
+                HashMap<String, String> params = new HashMap<String, String>();
+                params.put("GO", "1");
+                sendCommand(Phx42Message.createMessageToSendToPhx42("AIGS", params, null));
             }
         });
         igniteButton.setVisibility(View.INVISIBLE);
@@ -273,23 +276,28 @@ public class MainActivity extends AppCompatActivity {
             Thread.sleep(200);
 
             //set the periodic rate to 1 second
-            sendCommand("VERS");
+            sendCommand(Phx42Message.createMessageToSendToPhx42("VERS",  null, null));
 
             Thread.sleep(200);
 
             //set the periodic rate to 1 second
-            sendCommand("TRPT MS=1000");
+            HashMap<String, String> params = new HashMap<String, String>();
+            params.put("MS", "1000");
+            sendCommand(Phx42Message.createMessageToSendToPhx42("TRPT", params, null));
 
             Thread.sleep(200);
 
             //enable periodic FID Readings (this is the message that has the PPM value)
-            sendCommand("PRPT TYPE=FIDR,EN=1");
+            params = new HashMap<String, String>();
+            params.put("TYPE", "FIDR");
+            params.put("EN", "1");
+            sendCommand(Phx42Message.createMessageToSendToPhx42("PRPT", params, null));
 
             Thread.sleep(200);
 
             while(socket != null){
                 //send the heartbeat
-                sendCommand("CHEK");
+                sendCommand(Phx42Message.createMessageToSendToPhx42("CHEK", null,  null));
 
                 //any space of less than a second between heartbeats should be fine
                 Thread.sleep(900);
@@ -301,46 +309,31 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void handleMessage(String message){
-        //parse the message
-        String[] parts = message.split(" ");
+        try{
+            Phx42Message m = Phx42Message.parseMessageFromPhx42(message);
 
-        //first part is "YTyt",  nothing useful we need to do with that
-
-        //the second part is the message type
-        String type = parts[1];
-
-        if (type.equalsIgnoreCase("CHEK")){
-            heartbeat();
-        } else if (type.equalsIgnoreCase("FIDR")){ //handle FID readings message
-            //the third part is the parameters
-            String[] parameters = parts[2].split(",");
-
-            //loop through the parameters and find the ppm
-            for(String param : parameters){
-                if (param.startsWith("CALPPM=")){
-                    setPPM(param.replaceFirst("CALPPM=", ""));
-                    break;
+            if (m.getType().equalsIgnoreCase("CHEK")){
+                heartbeat();
+            } else if (m.getType().equalsIgnoreCase("FIDR")){ //handle FID readings message
+                if (m.hasParameter("CALPPM")){
+                    setPPM(m.getParameterValue("CALPPM"));
                 }
+            } else if (m.getType().equalsIgnoreCase("SERR") || m.getType().equalsIgnoreCase("EROR")){ //handle spontaneous errors
+                setStatus("phx reported an error: CODE=" + m.getParameterValue("CODE"));
+            } else if (m.getType().equalsIgnoreCase("SHUT")){ //handle errors
+                setStatus("phx reported flameout error: " + m.getExtra());
+            } else if (m.getType().equalsIgnoreCase("VERS")){ //handle firmware version
+                final String version = m.getParameterValue("MAJOR") + "." + m.getParameterValue("MINOR");
+
+                uiHandler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        versionView.setText("Firmware version: " + version);
+                    }
+                });
             }
-        } else if (type.equalsIgnoreCase("SERR")){ //handle spontaneous errors
-            setStatus("phx reported an error: " + parts[2]);
-        } else if (type.equalsIgnoreCase("EROR")){ //handle errors
-            setStatus("phx reported an error: " + parts[2]);
-        } else if (type.equalsIgnoreCase("SHUT")){ //handle errors
-            setStatus("phx reported flameout error: " + message.replaceFirst("YTyt SHUT ", ""));
-        } else if (type.equalsIgnoreCase("VERS")){ //handle firmware version
-            final String version = message
-                    .replaceFirst("YTyt VERS ", "")
-                    .replaceFirst("MAJOR=", "")
-                    .replaceFirst("MINOR=", "")
-                    .replaceFirst(",", ".");
+        }catch (Exception ex){
 
-            uiHandler.post(new Runnable() {
-                @Override
-                public void run() {
-                    versionView.setText("Firmware version: " + version);
-                }
-            });
         }
     }
 
@@ -348,25 +341,20 @@ public class MainActivity extends AppCompatActivity {
         Date date = Calendar.getInstance().getTime();
         DateFormat dateFormat = new SimpleDateFormat("yyyy/MM/dd_HH:mm:ss");
 
-        sendCommand("TIME MS=" + dateFormat.format(date));
+        HashMap<String, String> params = new HashMap<String, String>();
+        params.put("MS", dateFormat.format(date));
+
+        Phx42Message message = Phx42Message.createMessageToSendToPhx42("TIME", params,  null);
+
+        sendCommand(message);
     }
 
     //it is important to synchronize when you access outputStream.write()
-    private synchronized void sendCommand(String command){
+    private synchronized void sendCommand(Phx42Message message){
         if (outputStream == null) return;
 
-        try {
-            //make sure the command starts with the proper prefix
-            if (!command.startsWith(hostToUnit + " ")){
-                command = hostToUnit + " " + command;
-            }
-
-            //make sure the command ends with the end of message delimiter
-            if (!command.endsWith(endOfMessage)){
-                command = command + endOfMessage;
-            }
-
-            outputStream.write(command.getBytes(Charset.forName("UTF-8")));
+        try{
+            outputStream.write(message.toString().getBytes(Charset.forName("UTF-8")));
             outputStream.flush();   // always flush so the message gets written immediately
         } catch (Exception ex){
 
